@@ -25,9 +25,10 @@ FLOW_NODE_TAGS = [
 ]
 
 # Custom non-standard tags that should be mapped to standard BPMN types
+# Format: custom_tag -> (mapped_bpmn_type, is_multi_instance)
 CUSTOM_TAG_MAP = {
-    "countersignTask": "userTask",
-    "multiInstanceTask": "userTask",
+    "countersignTask": ("userTask", True),
+    "multiInstanceTask": ("userTask", True),
 }
 
 def perform_conversion(content, filename):
@@ -76,6 +77,7 @@ def parse_file_content(content):
                     "name": _extract_attr(attrs, "name") or "",
                     "incoming": re.findall(r'<(?:\w+:)?incoming>(.*?)</(?:\w+:)?incoming>', body),
                     "outgoing": re.findall(r'<(?:\w+:)?outgoing>(.*?)</(?:\w+:)?outgoing>', body),
+                    "multi_instance": False,
                 }
                 if elem["id"]: proc["elements"].append(elem)
             
@@ -83,13 +85,13 @@ def parse_file_content(content):
             sc_pattern = re.compile(rf'<(?:\w+:)?{tag_name}\b([^>]*)/>', re.DOTALL)
             for m in sc_pattern.finditer(proc_body):
                 attrs = m.group(1)
-                elem = {"type": tag_name, "id": _extract_attr(attrs, "id") or "", "name": _extract_attr(attrs, "name") or "", "incoming": [], "outgoing": []}
+                elem = {"type": tag_name, "id": _extract_attr(attrs, "id") or "", "name": _extract_attr(attrs, "name") or "", "incoming": [], "outgoing": [], "multi_instance": False}
                 if elem["id"] and elem["id"] not in {e["id"] for e in proc["elements"]}:
                     proc["elements"].append(elem)
 
         # Parse custom/non-standard tags (e.g. countersignTask inside extensionElements)
         existing_ids = {e["id"] for e in proc["elements"]}
-        for custom_tag, mapped_type in CUSTOM_TAG_MAP.items():
+        for custom_tag, (mapped_type, is_multi_instance) in CUSTOM_TAG_MAP.items():
             custom_pattern = re.compile(rf'<(?:\w+:)?{custom_tag}\b([^>]*)>(.*?)</(?:\w+:)?{custom_tag}>', re.DOTALL)
             for m in custom_pattern.finditer(proc_body):
                 attrs, body = m.group(1), m.group(2)
@@ -100,6 +102,7 @@ def parse_file_content(content):
                         "name": _extract_attr(attrs, "name") or "",
                         "incoming": re.findall(r'<(?:\w+:)?incoming>(.*?)</(?:\w+:)?incoming>', body),
                         "outgoing": re.findall(r'<(?:\w+:)?outgoing>(.*?)</(?:\w+:)?outgoing>', body),
+                        "multi_instance": is_multi_instance,
                     }
                     proc["elements"].append(elem)
                     existing_ids.add(eid)
@@ -183,6 +186,8 @@ def build_bpmn(data):
             lines.append(f'    <{tag} id="{_esc(e["id"])}"{n_attr}>')
             for inc in e["incoming"]: lines.append(f'      <bpmn:incoming>{_esc(inc)}</bpmn:incoming>')
             for out in e["outgoing"]: lines.append(f'      <bpmn:outgoing>{_esc(out)}</bpmn:outgoing>')
+            if e.get("multi_instance"):
+                lines.append('      <bpmn:multiInstanceLoopCharacteristics />')
             lines.append(f'    </{tag}>')
         
         for f in proc["flows"]:
