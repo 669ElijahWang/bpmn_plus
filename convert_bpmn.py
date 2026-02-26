@@ -153,14 +153,6 @@ def build_bpmn(data):
     lines = ['<?xml version="1.0" encoding="UTF-8"?>']
     lines.append('<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:modeler="http://camunda.org/schema/modeler/1.0" id="Definitions_1" targetNamespace="http://bpmn.io/schema/bpmn" exporter="Camunda Modeler" exporterVersion="5.42.0" modeler:executionPlatform="Camunda Cloud" modeler:executionPlatformVersion="8.8.0">')
 
-    # Prep coordinate offset
-    if data["shapes"]:
-        xs = [s["x"] for s in data["shapes"] if s["x"] is not None]
-        ys = [s["y"] for s in data["shapes"] if s["y"] is not None]
-        off_x = max(0, 100 - min(xs)) if xs else 0
-        off_y = max(0, 100 - min(ys)) if ys else 0
-    else: off_x, off_y = 0, 0
-
     shape_map = {}
     gateways = set()
     for proc in data["processes"]:
@@ -168,15 +160,36 @@ def build_bpmn(data):
             if "Gateway" in e["type"]: gateways.add(e["id"])
             shape_map[e["id"]] = {"type": e["type"]}
 
+    # Parse dimensions and determine bounds, converting center x,y to top-left if needed
     for s in data["shapes"]:
         stype = shape_map.get(s["bpmnElement"], {}).get("type", "task")
         dw, dh = DIMENSIONS.get(stype, DEFAULT_SIZE)
         if s["bpmnElement"] in shape_map:
+            w = s["width"] or dw
+            h = s["height"] or dh
+            orig_x = s["x"]
+            orig_y = s["y"]
+            if s["width"] is None and s["height"] is None:
+                # Top-left calculation from center
+                if orig_x is not None: orig_x -= w / 2
+                if orig_y is not None: orig_y -= h / 2
+
             shape_map[s["bpmnElement"]].update({
                 "id": f"{s['bpmnElement']}_di",
-                "x": (s["x"] or 0) + off_x, "y": (s["y"] or 0) + off_y,
-                "w": s["width"] or dw, "h": s["height"] or dh
+                "x_raw": orig_x, "y_raw": orig_y,
+                "w": w, "h": h
             })
+
+    # Prep coordinate offset based on top-left values
+    raw_xs = [s["x_raw"] for s in shape_map.values() if "x_raw" in s and s["x_raw"] is not None]
+    raw_ys = [s["y_raw"] for s in shape_map.values() if "y_raw" in s and s["y_raw"] is not None]
+    off_x = max(0, 100 - min(raw_xs)) if raw_xs else 0
+    off_y = max(0, 100 - min(raw_ys)) if raw_ys else 0
+
+    for eid, s in shape_map.items():
+        if "x_raw" in s and s["x_raw"] is not None:
+            s["x"] = s["x_raw"] + off_x
+            s["y"] = s["y_raw"] + off_y
 
     for proc in data["processes"]:
         lines.append(f'  <bpmn:process id="{_esc(proc["id"])}" name="{_esc(proc["name"])}" isExecutable="true">')
@@ -207,13 +220,48 @@ def build_bpmn(data):
                 lines.append(f'      <bpmndi:BPMNShape id="{_esc(s["id"])}" bpmnElement="{_esc(eid)}">')
                 lines.append(f'        <dc:Bounds x="{int(s["x"])}" y="{int(s["y"])}" width="{int(s["w"])}" height="{int(s["h"])}" />')
                 lines.append('      </bpmndi:BPMNShape>')
+        
         for proc in data["processes"]:
             for f in proc["flows"]:
                 src, tgt = shape_map.get(f["sourceRef"]), shape_map.get(f["targetRef"])
                 if src and tgt and "x" in src and "x" in tgt:
+                    scx, scy = src["x"] + src["w"] / 2, src["y"] + src["h"] / 2
+                    tcx, tcy = tgt["x"] + tgt["w"] / 2, tgt["y"] + tgt["h"] / 2
+                    
+                    dx, dy = tcx - scx, tcy - scy
+                    if abs(dx) >= abs(dy):
+                        src_face = "RIGHT" if dx >= 0 else "LEFT"
+                        tgt_face = "LEFT" if dx >= 0 else "RIGHT"
+                    else:
+                        src_face = "BOTTOM" if dy >= 0 else "TOP"
+                        tgt_face = "TOP" if dy >= 0 else "BOTTOM"
+                    
+                    def get_pt(box, face):
+                        if face == "RIGHT": return box["x"] + box["w"], box["y"] + box["h"] / 2
+                        if face == "LEFT": return box["x"], box["y"] + box["h"] / 2
+                        if face == "BOTTOM": return box["x"] + box["w"] / 2, box["y"] + box["h"]
+                        if face == "TOP": return box["x"] + box["w"] / 2, box["y"]
+                    
+                    x1, y1 = get_pt(src, src_face)
+                    x2, y2 = get_pt(tgt, tgt_face)
+                    
+                    pts = [(x1, y1)]
+                    if src_face in ("LEFT", "RIGHT") and tgt_face in ("LEFT", "RIGHT"):
+                        if abs(y1 - y2) > 10:
+                            mid_x = (x1 + x2) / 2
+                            pts.extend([(mid_x, y1), (mid_x, y2)])
+                    elif src_face in ("TOP", "BOTTOM") and tgt_face in ("TOP", "BOTTOM"):
+                        if abs(x1 - x2) > 10:
+                            mid_y = (y1 + y2) / 2
+                            pts.extend([(x1, mid_y), (x2, mid_y)])
+                    else:
+                        pts.append((x2, y1) if src_face in ("LEFT", "RIGHT") else (x1, y2))
+                    
+                    pts.append((x2, y2))
+                    
                     lines.append(f'      <bpmndi:BPMNEdge id="{_esc(f["id"])}_di" bpmnElement="{_esc(f["id"])}">')
-                    lines.append(f'        <di:waypoint x="{int(src["x"] + src["w"])}" y="{int(src["y"] + src["h"]//2)}" />')
-                    lines.append(f'        <di:waypoint x="{int(tgt["x"])}" y="{int(tgt["y"] + tgt["h"]//2)}" />')
+                    for px, py in pts:
+                        lines.append(f'        <di:waypoint x="{int(px)}" y="{int(py)}" />')
                     lines.append('      </bpmndi:BPMNEdge>')
         lines.append('    </bpmndi:BPMNPlane>')
         lines.append('  </bpmndi:BPMNDiagram>')
@@ -228,7 +276,7 @@ def convert_file(inp):
         if xml:
             out = f"{os.path.splitext(inp)[0]}_camunda.bpmn"
             with open(out, "w", encoding="utf-8") as f: f.write(xml)
-            print(f"✓ {inp} -> {out}")
+            print(f"[OK] {inp} -> {out}")
             return True
     except Exception as e:
         print(f"Error converting {inp}: {e}")
