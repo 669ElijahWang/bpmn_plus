@@ -12,6 +12,9 @@ DIMENSIONS = {
     "userTask": (100, 80),
     "exclusiveGateway": (50, 50),
     "parallelGateway": (50, 50),
+    "inclusiveGateway": (50, 50),
+    "eventBasedGateway": (50, 50),
+    "complexGateway": (50, 50),
     "task": (100, 80),
 }
 DEFAULT_SIZE = (100, 80)
